@@ -28,6 +28,7 @@ from .config import (
 )
 from .rules import ext_allowed, parse_exclude_patterns, should_exclude_dir
 from .manifest import Manifest
+from .verify import VERIFY_NONE, verify_file
 from .winapi import copy_file_native
 
 CHUNK_SIZE = 1024 * 1024              # 分块复制用 1MB
@@ -47,6 +48,7 @@ class CopyStats:
     bytes_copied: int = 0
     dirs_created: int = 0
     excluded_dirs: int = 0
+    files_verified: int = 0
     cancelled: bool = False
     errors: list[tuple[str, str]] = field(default_factory=list)
 
@@ -216,12 +218,23 @@ def copy_volume(
 
             written = _copy_one_file(src, dst, cancel, size)
 
+            # 复制后校验：失败就删掉目标，交给统一的失败分支记录（下轮会重试）
+            ok, reason = verify_file(src, dst, cfg.verify_mode, size)
+            if not ok:
+                try:
+                    os.unlink(dst)
+                except OSError:
+                    pass
+                raise OSError(f"校验失败：{reason}")
+
             if manifest is not None and rel:
                 manifest.record(rel, size, mtime_ns)
 
             with stats_lock:
                 stats.files_copied += 1
                 stats.bytes_copied += written
+                if cfg.verify_mode != VERIFY_NONE:
+                    stats.files_verified += 1
                 copied = stats.files_copied
                 total_bytes = stats.bytes_copied
             if progress:

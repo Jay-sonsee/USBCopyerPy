@@ -48,6 +48,14 @@ CONFLICT_LABELS_REVERSE = {v: k for k, v in CONFLICT_LABELS.items()}
 EXT_LABELS = {"all": "复制所有文件", "black": "黑名单（排除）", "white": "白名单（仅复制）"}
 EXT_REVERSE = {v: k for k, v in EXT_LABELS.items()}
 
+VERIFY_LABELS = {
+    "none": "不校验（最快）",
+    "size": "大小 + 时间戳（快）",
+    "sample": "采样哈希（推荐）",
+    "full": "全量哈希（最可靠，最慢）",
+}
+VERIFY_REVERSE = {v: k for k, v in VERIFY_LABELS.items()}
+
 SIZE_LABELS = {"none": "不限制", "max": "只复制小于", "min": "只复制大于"}
 SIZE_REVERSE = {v: k for k, v in SIZE_LABELS.items()}
 
@@ -159,6 +167,18 @@ class SettingsDialog(tk.Toplevel):
             foreground="#666",
         ).grid(row=10, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 4))
 
+        self.vars["verify_mode"] = tk.StringVar(
+            value=VERIFY_LABELS.get(self.cfg.verify_mode, "采样哈希（推荐）")
+        )
+        self._row(f, 11, "复制后校验",
+                  ttk.Combobox(f, textvariable=self.vars["verify_mode"],
+                               values=list(VERIFY_LABELS.values()), state="readonly", width=26))
+        ttk.Label(
+            f,
+            text="采样哈希只读头/中/尾各 16KB，大文件额外开销约 0.05%；全量哈希会把文件再读一遍",
+            foreground="#666",
+        ).grid(row=12, column=0, columnspan=3, sticky="w", padx=6)
+
     def _tab_disk(self, nb, pad) -> None:
         f = ttk.Frame(nb, padding=6)
         nb.add(f, text="磁盘筛选")
@@ -246,6 +266,7 @@ class SettingsDialog(tk.Toplevel):
         cfg.clear_target_first = bool(self.vars["clear_target_first"].get())
         cfg.skip_empty_dirs = bool(self.vars["skip_empty_dirs"].get())
         cfg.use_manifest = bool(self.vars["use_manifest"].get())
+        cfg.verify_mode = VERIFY_REVERSE.get(self.vars["verify_mode"].get(), "sample")
 
         cfg.ext_mode = EXT_REVERSE.get(self.vars["ext_mode"].get(), EXT_ALL)
         cfg.black_exts = self.vars["black_exts"].get().strip()

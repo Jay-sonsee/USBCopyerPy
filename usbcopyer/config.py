@@ -91,6 +91,7 @@ class Config:
     copy_threads: int = 4               # 单个磁盘内并行复制文件的线程数（1=串行）
     exclude_dirs: str = ""                # 排除的文件夹，逗号/换行分隔，支持通配符
     use_manifest: bool = True             # 用增量清单跳过已备份且未变化的文件
+    verify_mode: str = "sample"           # 复制后校验：none / size / sample / full
 
     # —— 扩展名过滤 ——
     ext_mode: str = EXT_ALL
@@ -157,6 +158,8 @@ class Config:
             problems.append("扩展名模式无效")
         if self.size_mode not in SIZE_CHOICES:
             problems.append("大小限制模式无效")
+        if self.verify_mode not in ("none", "size", "sample", "full"):
+            problems.append("校验方式无效")
         if self.disk_mode not in DISK_CHOICES:
             problems.append("黑白名单模式无效")
         if self.delay_seconds < 0:
