@@ -65,6 +65,9 @@ jobs:
             if ($_.Length -lt 3MB) { throw "产物异常偏小：$($_.Name)" }
           }
           & "dist\USBCopyerPy-console-${{ matrix.suffix }}.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "console exe --version 失败" }
+          & "dist\USBCopyerPy-console-${{ matrix.suffix }}.exe" --selftest
+          if ($LASTEXITCODE -ne 0) { throw "打包产物自检失败（tkinter 可能没打进去）" }
 
       - uses: actions/upload-artifact@v4
         with:

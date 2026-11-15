@@ -121,13 +121,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--once", metavar="盘符", help="立即复制指定磁盘一次")
     p.add_argument("--dry-run", action="store_true", help="配合 --once，只统计不写文件")
     p.add_argument("--reset", action="store_true", help="恢复默认配置后退出")
+    p.add_argument("--selftest", action="store_true", help="自检：验证打包后的 tkinter 与模块可用")
     p.add_argument("--version", action="version", version=f"{APP_NAME} {__version__}")
     return p
+
+
+def cmd_selftest() -> int:
+    """在打包后的 exe 里验证 tkinter 与界面模块是否被正确打进去。"""
+    import tkinter as tk
+
+    from . import ui  # noqa: F401  确保 ui 模块可导入
+
+    root = tk.Tk()
+    root.withdraw()
+    root.update_idletasks()
+    root.destroy()
+    print("selftest OK: tkinter 可用，ui 模块已打包")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     cfg = Config.load(args.config)
+
+    if args.selftest:
+        return cmd_selftest()
 
     if args.reset:
         path = cfg.save(args.config)

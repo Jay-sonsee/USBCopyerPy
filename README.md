@@ -93,14 +93,36 @@ python -m unittest discover -s tests -t .
 
 49 个用例，覆盖规则解析、扩展名过滤、冲突策略、取消、时间戳保留、配置读写、驱动器事件差分。
 
+## 下载已打包的 exe
+
+在 [Releases](https://github.com/Jay-sonsee/USBCopyerPy/releases) 页面下载：
+
+| 文件 | 适用 |
+|---|---|
+| `USBCopyerPy-x64.exe` | Win7 SP1 x64 / Win10 x64（推荐） |
+| `USBCopyerPy-x86.exe` | 32 位系统 |
+| `USBCopyerPy-console-x64.exe` | 带控制台，方便看日志 / 跑 `--headless` |
+
+**Win7 用户注意**：exe 由 Python 3.8 打包，需要系统已安装 **Universal C Runtime**
+（更新 `KB2999226`）。打过补丁的 Win7 SP1 一般都有；若启动报缺少
+`api-ms-win-crt-runtime-l1-1-0.dll`，装一下该更新即可。Win10 无需额外操作。
+
+首次运行 exe 会有 2~3 秒解压时间（PyInstaller onefile 特性），之后正常。
+
 ## 打包成 exe（可选）
 
+本地打包：
+
 ```bat
-pip install pyinstaller
-pyinstaller -F -w -n USBCopyerPy usbcopyer\__main__.py
+pip install pyinstaller==5.13.2
+pyinstaller -F -w -n USBCopyerPy --paths . --hidden-import usbcopyer.ui packaging\entry.py
 ```
 
 `-w` 表示不带控制台窗口；如果要用 `--headless` 就别加 `-w`。
+
+仓库自带 GitHub Actions（`.github/workflows/build-exe.yml`），推 tag 即自动
+产出 x64/x86 双架构并发布 Release。
+
 
 ## 已知限制
 
