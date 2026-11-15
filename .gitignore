@@ -6,3 +6,6 @@ build/
 dist/
 *.spec
 dist-exe/
+config.json
+USBCopyerData/
+.usbcopyer_write_test

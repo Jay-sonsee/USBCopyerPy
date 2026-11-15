@@ -47,6 +47,19 @@ kernel32.WaitForSingleObject.argtypes = [wt.HANDLE, wt.DWORD]
 EVENT_MODIFY_STATE = 0x0002
 INFINITE = 0xFFFFFFFF
 
+kernel32.CopyFileW.restype = wt.BOOL
+kernel32.CopyFileW.argtypes = [wt.LPCWSTR, wt.LPCWSTR, wt.BOOL]
+
+
+def copy_file_native(src: str, dst: str, overwrite: bool = True) -> None:
+    """用系统 API 复制单个文件（比 Python 分块快很多）。
+
+    CopyFileW 会一并保留时间戳与属性；失败抛 OSError。
+    它本身不可中断，因此只用于中小文件，超大文件仍走分块复制。
+    """
+    if not kernel32.CopyFileW(src, dst, not overwrite):
+        raise OSError(ctypes.get_last_error(), f"CopyFileW 失败：{src}")
+
 ERROR_ALREADY_EXISTS = 183
 
 # GetDriveType 返回值 -> 语义键

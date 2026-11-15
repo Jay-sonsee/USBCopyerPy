@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
@@ -40,9 +41,39 @@ DRIVE_TYPE_KEYS = ("unknown", "no_root", "removable", "fixed", "remote", "cdrom"
 DEFAULT_SKIP_TYPES = ["remote", "cdrom", "fixed", "unknown", "no_root", "ramdisk"]
 
 
+def app_base_dir() -> Path:
+    """程序所在目录：打包后是 exe 所在目录，源码运行时是项目根目录。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[1]
+
+
+_PORTABLE_DIR: Path | None = None
+
+
 def default_config_dir() -> Path:
-    base = os.environ.get("APPDATA") or str(Path.home())
-    return Path(base) / APP_DIR_NAME
+    """便携优先：配置与数据放在程序目录；目录只读时退回 %APPDATA%。
+
+    U 盘/绿色版场景下整个目录可以直接拷走，配置跟着走。
+    """
+    global _PORTABLE_DIR
+    if _PORTABLE_DIR is not None:
+        return _PORTABLE_DIR
+
+    base = app_base_dir()
+    probe = base / ".usbcopyer_write_test"
+    try:
+        probe.write_text("", encoding="utf-8")
+        probe.unlink()
+        _PORTABLE_DIR = base
+    except OSError:
+        fallback = Path(os.environ.get("APPDATA") or Path.home()) / APP_DIR_NAME
+        try:
+            fallback.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        _PORTABLE_DIR = fallback
+    return _PORTABLE_DIR
 
 
 @dataclass
@@ -142,6 +173,11 @@ class Config:
     @classmethod
     def load(cls, path: str | os.PathLike | None = None) -> "Config":
         p = Path(path) if path else default_config_dir() / "config.json"
+        if not p.exists() and path is None:
+            # 旧版本把配置放在 %APPDATA%，首次运行时平滑迁移过来
+            legacy = Path(os.environ.get("APPDATA") or Path.home()) / APP_DIR_NAME / "config.json"
+            if legacy.exists():
+                p = legacy
         if not p.exists():
             return cls()
         try:
