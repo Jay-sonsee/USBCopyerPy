@@ -1,0 +1,110 @@
+# USBCopyerPy
+
+把原 C# 版 [USBCopyer](https://github.com/kenvix/USBCopyer) 用 Python 重写：U 盘插入后自动把整盘文件备份到指定目录。
+
+**只用标准库**（tkinter 随 Python 自带），不需要 `pip install` 任何东西。
+
+## 快速开始
+
+```bat
+python -m usbcopyer --settings     :: 先配置备份目录
+python -m usbcopyer                :: 打开控制面板，开始监听
+```
+
+或者双击 `run.bat`。
+
+命令行：
+
+```bat
+python -m usbcopyer --list         :: 看当前所有盘符、卷标、序列号
+python -m usbcopyer --headless     :: 无界面常驻，日志打到控制台
+python -m usbcopyer --once E:      :: 立即把 E: 备份一次（跳过筛选）
+python -m usbcopyer --once E: --dry-run   :: 只统计，不写文件
+python -m usbcopyer --reset        :: 恢复默认配置
+```
+
+## 功能对照
+
+| 功能 | 原 C# 版 | 本版 |
+|---|---|---|
+| 插入检测 | `WM_DEVICECHANGE` 消息 | 轮询盘符（默认 1 秒） |
+| 目录规则 | `[name] [serial] [letter] [type] [fs]` | 相同 |
+| 扩展名黑白名单 | ✅ | ✅ |
+| 无扩展名文件 | ❌ 抛异常被跳过 | ✅ |
+| 冲突策略 | 较新覆盖 / 重命名 / 覆盖 | 相同（重命名已修复非法路径） |
+| 停止复制 | `Thread.Abort()` | 协作式取消，分块检查 |
+| 磁盘黑白名单 | ✅（按序列号/盘符） | ✅ |
+| 延迟复制 | ✅ | ✅ |
+| 回调脚本 | `.bat` + 占位符 | 相同 |
+| 磁盘日志 | `Disks.csv` | `Disks.csv`（带表头，UTF-8 BOM） |
+| 单实例 | 按 exe 进程名 | 命名互斥体（改名也有效） |
+| 托盘图标 | ✅ | ❌ 用控制面板窗口代替（避免依赖 pystray） |
+
+## 配置
+
+配置文件：`%APPDATA%\USBCopyerPy\config.json`，也可以在界面里改。
+
+| 字段 | 说明 |
+|---|---|
+| `destination` | 备份根目录 |
+| `folder_rule` | 子目录命名规则，默认 `[serial]` |
+| `conflict` | `skip_if_newer` / `overwrite` / `rename` |
+| `delay_seconds` | 插入后延迟开始 |
+| `ext_mode` / `black_exts` / `white_exts` | 扩展名过滤 |
+| `size_mode` / `size_limit_mb` | 大小限制（`none`/`max`/`min`） |
+| `skip_types` | 跳过哪些驱动器类型（默认跳过网络盘、光驱、本地硬盘） |
+| `disk_mode` / `black_serials` / `black_letters` | 黑白名单 |
+| `poll_interval` | 轮询间隔（秒） |
+
+### 分类规则语法
+
+```
+[serial]               -> 1A2B3C4D
+"备份-" [letter]        -> 备份-E
+[name]_[fs]            -> MYUSB_exFAT
+```
+
+- `[name]` 卷标、`[serial]` 序列号、`[letter]` 盘符、`[type]` 驱动器类型、`[fs]` 文件系统
+- 双引号内是字面量；`@"` 表示字面量里的 `"`，`@@` 表示 `@`
+- `[[` 表示字面量 `[`
+
+## 回调脚本
+
+放在 `%APPDATA%\USBCopyerPy\` 下：
+
+- `DiskDetectedCallback.bat` —— 检测到磁盘时执行
+- `AllCompletedCallback.bat` —— 该磁盘复制完成后执行
+
+可用占位符：`{$VolumeSerialNumber}` `{$VolumeName}` `{$Volume}` `{$DriveType}` `{$USBDir}`
+
+## 与原版的行为差异
+
+1. **轮询代替窗口消息**：原版靠 `WM_DEVICECHANGE`，盘符掩码异常时会抛 `IndexOutOfRangeException` 并丢掉整次插入事件；轮询没有这类解析风险，代价是最多延迟一个周期。
+2. **取消是协作式的**：原版用 `Thread.Abort()`，取消要等当前 `File.Copy` 返回，拔盘后还会继续遍历；本版每次读 1MB 就检查一次取消标志，取消或失败都会删掉没拷完的半截文件。
+3. **状态全部加锁**：原版 `Dictionary` 在多线程间裸读裸写，点"停止"时偶发 `Collection was modified`。
+4. **单实例用互斥体**：原版按进程名判断，改了 exe 名字就能起两个实例。
+5. **复制目标不能位于源盘内**：直接拒绝，避免自我递归。
+
+## 测试
+
+```bat
+python -m unittest discover -s tests -t .
+```
+
+49 个用例，覆盖规则解析、扩展名过滤、冲突策略、取消、时间戳保留、配置读写、驱动器事件差分。
+
+## 打包成 exe（可选）
+
+```bat
+pip install pyinstaller
+pyinstaller -F -w -n USBCopyerPy usbcopyer\__main__.py
+```
+
+`-w` 表示不带控制台窗口；如果要用 `--headless` 就别加 `-w`。
+
+## 已知限制
+
+- 只能装在 Windows（依赖 `GetLogicalDrives` 等 API）
+- 没有托盘图标：关闭主窗口等于退出
+- 轮询间隔过小（<0.5 秒）会更耗 CPU
+- 未做开机自启注册表项（如需可以自己加计划任务）

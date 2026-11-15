@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.testtmp/
+.smoke/
+build/
+dist/
+*.spec
