@@ -1,6 +1,6 @@
 name: build-exe
 
-# 目标：Windows 7 SP1 x64 与 Windows 10 都能跑。
+# 目标：Windows 7 SP1 x64 与 Windows 10 都能跑（重新索引触发）
 # 因此使用 Python 3.8（3.9 起官方不再支持 Win7）+ PyInstaller 5.13（最后一个
 # 支持 Win7 的 bootloader 系列）。同时产出 x64 与 x86 两个架构，x86 版可覆盖
 # 老机器的 32 位系统。
