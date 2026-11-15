@@ -126,6 +126,21 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _configure_console() -> None:
+    """控制台编码兜底。
+
+    英文版 Windows 的控制台代码页是 1252，直接 print 中文会抛
+    UnicodeEncodeError 把进程打死。这里保留原编码、只把错误策略改成
+    replace：中文系统照常显示，非中文系统最多显示成 ?，不会崩。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.reconfigure(errors="replace")
+        except Exception:
+            pass
+
 def cmd_selftest() -> int:
     """在打包后的 exe 里验证 tkinter 与界面模块是否被正确打进去。"""
     import tkinter as tk
@@ -136,11 +151,12 @@ def cmd_selftest() -> int:
     root.withdraw()
     root.update_idletasks()
     root.destroy()
-    print("selftest OK: tkinter 可用，ui 模块已打包")
+    print("selftest OK: tkinter available, ui module bundled")
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_console()
     args = build_parser().parse_args(argv)
     cfg = Config.load(args.config)
 
