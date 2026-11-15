@@ -1,9 +1,11 @@
-"""复制引擎：分块复制、可取消、冲突策略、过滤、进度回调。
+"""复制引擎：分块/原生复制、可取消、冲突策略、过滤、进度回调、多线程。
 
-设计要点（对应原 C# 版踩过的坑）：
-- 用 1MB 分块读写，`cancel_event` 在每个分块间检查，取消立即生效
-- 取消或失败时删除写了一半的目标文件，避免"半截文件比源文件新、永远不再覆盖"
-- 目标目录按需创建，天然跳过空目录
+设计要点：
+- ≤64MB 走系统 CopyFileW（实测快 1.3~1.7 倍），更大的分块复制以支持取消
+- cancel_event 在分块间与文件间检查，取消立即生效
+- 取消或失败时删除写了一半的目标文件，避免"半截文件比源文件新、永不覆盖"
+- 多线程时只并行"复制"这一步，遍历与冲突判定仍在单线程完成，
+  避免同一目标路径被两个线程同时决策
 """
 
 from __future__ import annotations
@@ -11,9 +13,10 @@ from __future__ import annotations
 import os
 import shutil
 import uuid
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
 from typing import Callable
 
 from .config import (
@@ -26,8 +29,9 @@ from .config import (
 from .rules import ext_allowed, parse_exclude_patterns, should_exclude_dir
 from .winapi import copy_file_native
 
-CHUNK_SIZE = 1024 * 1024          # 分块复制用 1MB
-NATIVE_COPY_LIMIT = 64 * 1024 * 1024   # ≤64MB 走系统 API，更快；更大的保留可取消的分块复制
+CHUNK_SIZE = 1024 * 1024              # 分块复制用 1MB
+NATIVE_COPY_LIMIT = 64 * 1024 * 1024  # ≤64MB 走系统 API
+MAX_OUTSTANDING_FACTOR = 8            # 线程数的 8 倍作为任务队列上限（背压）
 
 
 class Cancelled(Exception):
@@ -46,7 +50,7 @@ class CopyStats:
     errors: list[tuple[str, str]] = field(default_factory=list)
 
     def summary(self) -> str:
-        parts = [f"复制 {self.files_copied} 个文件", f"{format_size(self.bytes_copied)}"]
+        parts = [f"复制 {self.files_copied} 个文件", format_size(self.bytes_copied)]
         if self.files_skipped:
             parts.append(f"跳过 {self.files_skipped}")
         if self.files_failed:
@@ -65,12 +69,30 @@ def format_size(num: int) -> str:
     return f"{value:.1f}TB"
 
 
+def assert_target_outside_source(src_root: str, dst_root: str) -> None:
+    """拒绝把备份目录放在被备份的磁盘内部（避免自我递归）。
+
+    注意：Windows 上 os.path.commonpath 对跨盘符路径会抛 ValueError，
+    必须先比较盘符，否则把目标放到另一个盘就会误报。
+    """
+    src_drive, _ = os.path.splitdrive(src_root)
+    dst_drive, _ = os.path.splitdrive(dst_root)
+    if src_drive.lower() != dst_drive.lower():
+        return
+    try:
+        common = os.path.commonpath([src_root, dst_root])
+    except ValueError:
+        return
+    if os.path.normcase(common) == os.path.normcase(src_root):
+        raise ValueError("备份目录不能位于被备份的磁盘内部")
+
+
 def _copy_file_chunked(src: str, dst: str, cancel: Event) -> int:
-    """分块复制并保留时间戳；取消或异常时删除半成品。返回字节数。"""
+    """分块复制并保留时间戳；取消或异常时删除半成品。"""
     written = 0
     created = False
     try:
-        with open(src, "rb") as fin, open(dst, "wb") as fout:
+        with open(src, "rb", buffering=0) as fin, open(dst, "wb", buffering=0) as fout:
             created = True
             while True:
                 if cancel.is_set():
@@ -92,29 +114,8 @@ def _copy_file_chunked(src: str, dst: str, cancel: Event) -> int:
         raise
 
 
-def assert_target_outside_source(src_root: str, dst_root: str) -> None:
-    """拒绝把备份目录放在被备份的磁盘内部（避免自我递归）。
-
-    注意：在 Windows 上 os.path.commonpath 对跨盘符路径会抛 ValueError，
-    这里必须先比较盘符，否则把目标放到另一个盘就会误报。
-    """
-    src_drive, _ = os.path.splitdrive(src_root)
-    dst_drive, _ = os.path.splitdrive(dst_root)
-    if src_drive.lower() != dst_drive.lower():
-        return
-    try:
-        common = os.path.commonpath([src_root, dst_root])
-    except ValueError:
-        return
-    if os.path.normcase(common) == os.path.normcase(src_root):
-        raise ValueError("备份目录不能位于被备份的磁盘内部")
-
 def _copy_one_file(src: str, dst: str, cancel: Event, size: int) -> int:
-    """按大小选择最快的复制方式。
-
-    实测（200MB 大文件 / 2000 个小文件）系统 API 比 Python 分块快 1.3~1.7 倍，
-    但它无法中途取消，所以只对中小文件使用；超大文件仍分块以便随时停止。
-    """
+    """按大小选择最快的复制方式。"""
     if size <= NATIVE_COPY_LIMIT:
         copy_file_native(src, dst, overwrite=True)
         return size
@@ -129,7 +130,6 @@ def _unique_name(path: str) -> str:
 def scan_volume(volume, cfg: Config) -> tuple[int, int]:
     """预扫描：统计实际会被复制的文件数与字节数，供进度条计算百分比。
 
-    与 copy_volume 使用同一套过滤规则（排除文件夹 / 扩展名 / 大小限制），
     只读元数据，不读文件内容，几万个文件通常一两秒内完成。
     """
     src_root = os.path.abspath(volume.root)
@@ -171,6 +171,7 @@ def scan_volume(volume, cfg: Config) -> tuple[int, int]:
 
     return files, total
 
+
 def copy_volume(
     volume,
     target_dir: Path,
@@ -179,11 +180,14 @@ def copy_volume(
     log: Callable[[str, str], None],
     progress: Callable[[int, int, str], None] | None = None,
     dry_run: bool = False,
+    threads: int | None = None,
 ) -> CopyStats:
     """把整卷复制到 target_dir。volume 需有 .root / .letter。"""
     src_root = os.path.abspath(volume.root)
     dst_root = os.path.abspath(str(target_dir))
     stats = CopyStats()
+    stats_lock = Lock()
+    worker_count = max(1, int(threads if threads is not None else cfg.copy_threads))
 
     assert_target_outside_source(src_root, dst_root)
 
@@ -197,50 +201,99 @@ def copy_volume(
     size_limit = cfg.size_limit_mb * 1024 * 1024
     exclude_patterns = parse_exclude_patterns(cfg.exclude_dirs)
 
+    def process_file(src: str, dst: str, size: int) -> None:
+        """单个文件的复制 + 统计，可被多个线程同时调用。"""
+        if cancel.is_set():
+            return
+        try:
+            parent = os.path.dirname(dst)
+            if not os.path.isdir(parent):
+                os.makedirs(parent, exist_ok=True)
+                with stats_lock:
+                    stats.dirs_created += 1
+
+            written = _copy_one_file(src, dst, cancel, size)
+
+            with stats_lock:
+                stats.files_copied += 1
+                stats.bytes_copied += written
+                copied = stats.files_copied
+                total_bytes = stats.bytes_copied
+            if progress:
+                progress(copied, total_bytes, os.path.basename(src))
+        except Cancelled:
+            return
+        except OSError as exc:
+            with stats_lock:
+                stats.files_failed += 1
+                stats.errors.append((src, str(exc)))
+            log("warn", f"复制失败 {src}：{exc}")
+
+    pool = ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="copy") if worker_count > 1 and not dry_run else None
+    outstanding: set = set()
+    max_outstanding = worker_count * MAX_OUTSTANDING_FACTOR
+
+    def submit(src: str, dst: str, size: int) -> None:
+        if pool is None:
+            process_file(src, dst, size)
+            return
+        while len(outstanding) >= max_outstanding:
+            done, _ = wait(outstanding, return_when=FIRST_COMPLETED)
+            outstanding.difference_update(done)
+        outstanding.add(pool.submit(process_file, src, dst, size))
+
     def walk(current_src: str, current_dst: str, rel_path: str) -> None:
         if cancel.is_set():
-            raise Cancelled()
+            return
         try:
-            entries = list(os.scandir(current_src))
+            with os.scandir(current_src) as it:
+                entries = list(it)
         except OSError as exc:
-            stats.files_failed += 1
-            stats.errors.append((current_src, str(exc)))
+            with stats_lock:
+                stats.files_failed += 1
+                stats.errors.append((current_src, str(exc)))
             log("warn", f"无法读取目录 {current_src}：{exc}")
             return
 
         for entry in entries:
             if cancel.is_set():
-                raise Cancelled()
+                return
             try:
                 if entry.is_dir(follow_symlinks=False):
                     child_rel = f"{rel_path}\\{entry.name}" if rel_path else entry.name
                     if should_exclude_dir(child_rel, entry.name, exclude_patterns):
-                        stats.excluded_dirs += 1
+                        with stats_lock:
+                            stats.excluded_dirs += 1
                         continue
                     walk(entry.path, os.path.join(current_dst, entry.name), child_rel)
                     continue
                 if not entry.is_file(follow_symlinks=False):
                     continue
             except OSError as exc:
-                stats.files_failed += 1
-                stats.errors.append((entry.path, str(exc)))
+                with stats_lock:
+                    stats.files_failed += 1
+                    stats.errors.append((entry.path, str(exc)))
                 continue
 
             if not ext_allowed(entry.path, cfg.ext_mode, cfg.black_exts, cfg.white_exts, cfg.copy_no_ext):
-                stats.files_skipped += 1
+                with stats_lock:
+                    stats.files_skipped += 1
                 continue
 
             try:
                 stat = entry.stat()
             except OSError:
-                stats.files_skipped += 1
+                with stats_lock:
+                    stats.files_skipped += 1
                 continue
 
             if cfg.size_mode == SIZE_MAX and stat.st_size >= size_limit:
-                stats.files_skipped += 1
+                with stats_lock:
+                    stats.files_skipped += 1
                 continue
             if cfg.size_mode == SIZE_MIN and stat.st_size <= size_limit:
-                stats.files_skipped += 1
+                with stats_lock:
+                    stats.files_skipped += 1
                 continue
 
             dest_path = os.path.join(current_dst, entry.name)
@@ -253,37 +306,33 @@ def copy_volume(
                 else:  # skip_if_newer
                     try:
                         if stat.st_mtime <= os.path.getmtime(dest_path):
-                            stats.files_skipped += 1
+                            with stats_lock:
+                                stats.files_skipped += 1
                             continue
                     except OSError:
                         pass
 
             if dry_run:
-                stats.files_copied += 1
-                stats.bytes_copied += stat.st_size
+                with stats_lock:
+                    stats.files_copied += 1
+                    stats.bytes_copied += stat.st_size
                 continue
 
-            try:
-                parent = os.path.dirname(dest_path)
-                if not os.path.isdir(parent):
-                    os.makedirs(parent, exist_ok=True)
-                    stats.dirs_created += 1
-                written = _copy_one_file(entry.path, dest_path, cancel, stat.st_size)
-                stats.files_copied += 1
-                stats.bytes_copied += written
-                if progress:
-                    progress(stats.files_copied, stats.bytes_copied, entry.name)
-            except Cancelled:
-                raise
-            except OSError as exc:
-                stats.files_failed += 1
-                stats.errors.append((entry.path, str(exc)))
-                log("warn", f"复制失败 {entry.path}：{exc}")
+            submit(entry.path, dest_path, stat.st_size)
 
     try:
         walk(src_root, dst_root, "")
-    except Cancelled:
-        stats.cancelled = True
+    finally:
+        if pool is not None:
+            if cancel.is_set():
+                # 取消时不再等新任务，直接丢弃未开始的
+                for future in outstanding:
+                    future.cancel()
+            wait(outstanding)
+            pool.shutdown(wait=True)
+
+    stats.cancelled = cancel.is_set()
+    if stats.cancelled:
         log("warn", f"{volume.letter}: 复制已取消")
 
     return stats

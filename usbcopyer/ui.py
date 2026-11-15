@@ -196,12 +196,16 @@ class SettingsDialog(tk.Toplevel):
         self.vars["data_dir"] = tk.StringVar(value=self.cfg.data_dir)
         self._row(f, 5, "数据目录（留空用默认）", ttk.Entry(f, textvariable=self.vars["data_dir"], width=46))
 
+        self.vars["copy_threads"] = tk.IntVar(value=self.cfg.copy_threads)
+        self._row(f, 6, "复制线程数（1=串行）",
+                  ttk.Spinbox(f, from_=1, to=16, textvariable=self.vars["copy_threads"], width=8))
+
         self.vars["close_to_background"] = tk.BooleanVar(value=self.cfg.close_to_background)
         ttk.Checkbutton(f, text="关闭窗口时保持后台运行（再启动一次可唤出窗口）",
                         variable=self.vars["close_to_background"]).grid(
-            row=6, column=0, columnspan=2, sticky="w", padx=6, pady=(8, 3))
+            row=7, column=0, columnspan=2, sticky="w", padx=6, pady=(8, 3))
 
-        ttk.Label(f, text="轮询间隔、单实例需要重启程序后生效", foreground="#a15c00").grid(row=7, column=0, columnspan=2, sticky="w", padx=6, pady=(10, 0))
+        ttk.Label(f, text="轮询间隔、单实例需要重启程序后生效", foreground="#a15c00").grid(row=8, column=0, columnspan=2, sticky="w", padx=6, pady=(10, 0))
 
     # ---------------------------------------------------------------- 动作
     def _pick_dir(self) -> None:
@@ -244,6 +248,7 @@ class SettingsDialog(tk.Toplevel):
         cfg.poll_interval = float(self.vars["poll_interval"].get())
         cfg.max_parallel_copies = int(self.vars["max_parallel_copies"].get())
         cfg.single_instance = bool(self.vars["single_instance"].get())
+        cfg.copy_threads = int(self.vars["copy_threads"].get())
         cfg.close_to_background = bool(self.vars["close_to_background"].get())
         cfg.data_dir = self.vars["data_dir"].get().strip()
         return cfg

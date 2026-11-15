@@ -87,7 +87,8 @@ class Config:
     conflict: str = CONFLICT_SKIP_IF_NEWER
     delay_seconds: int = 0                # 插入后延迟多少秒再开始
     skip_empty_dirs: bool = True
-    max_parallel_copies: int = 1
+    max_parallel_copies: int = 1        # 同时复制的磁盘数
+    copy_threads: int = 4               # 单个磁盘内并行复制文件的线程数（1=串行）
     exclude_dirs: str = ""                # 排除的文件夹，逗号/换行分隔，支持通配符
 
     # —— 扩展名过滤 ——
@@ -160,6 +161,8 @@ class Config:
             problems.append("延迟时间不能为负")
         if self.size_limit_mb < 0:
             problems.append("大小限制不能为负")
+        if self.copy_threads < 1 or self.copy_threads > 16:
+            problems.append("复制线程数应在 1~16 之间")
         if self.poll_interval < 0.2:
             problems.append("轮询间隔不应小于 0.2 秒")
         try:
