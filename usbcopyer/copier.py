@@ -27,6 +27,7 @@ from .config import (
     Config,
 )
 from .rules import ext_allowed, parse_exclude_patterns, should_exclude_dir
+from .manifest import Manifest
 from .winapi import copy_file_native
 
 CHUNK_SIZE = 1024 * 1024              # 分块复制用 1MB
@@ -200,8 +201,9 @@ def copy_volume(
 
     size_limit = cfg.size_limit_mb * 1024 * 1024
     exclude_patterns = parse_exclude_patterns(cfg.exclude_dirs)
+    manifest = Manifest.for_target(dst_root, src_root).load() if cfg.use_manifest else None
 
-    def process_file(src: str, dst: str, size: int) -> None:
+    def process_file(src: str, dst: str, size: int, rel: str = "", mtime_ns: int = 0) -> None:
         """单个文件的复制 + 统计，可被多个线程同时调用。"""
         if cancel.is_set():
             return
@@ -213,6 +215,9 @@ def copy_volume(
                     stats.dirs_created += 1
 
             written = _copy_one_file(src, dst, cancel, size)
+
+            if manifest is not None and rel:
+                manifest.record(rel, size, mtime_ns)
 
             with stats_lock:
                 stats.files_copied += 1
@@ -233,14 +238,14 @@ def copy_volume(
     outstanding: set = set()
     max_outstanding = worker_count * MAX_OUTSTANDING_FACTOR
 
-    def submit(src: str, dst: str, size: int) -> None:
+    def submit(src: str, dst: str, size: int, rel: str = "", mtime_ns: int = 0) -> None:
         if pool is None:
-            process_file(src, dst, size)
+            process_file(src, dst, size, rel, mtime_ns)
             return
         while len(outstanding) >= max_outstanding:
             done, _ = wait(outstanding, return_when=FIRST_COMPLETED)
             outstanding.difference_update(done)
-        outstanding.add(pool.submit(process_file, src, dst, size))
+        outstanding.add(pool.submit(process_file, src, dst, size, rel, mtime_ns))
 
     def walk(current_src: str, current_dst: str, rel_path: str) -> None:
         if cancel.is_set():
@@ -297,6 +302,15 @@ def copy_volume(
                 continue
 
             dest_path = os.path.join(current_dst, entry.name)
+            file_rel = f"{rel_path}\\{entry.name}" if rel_path else entry.name
+
+            # 清单命中：大小、修改时间都对上，且目标文件还在 -> 直接跳过，不读源文件
+            if manifest is not None and manifest.is_unchanged(
+                file_rel, stat.st_size, stat.st_mtime_ns, dest_path
+            ):
+                with stats_lock:
+                    stats.files_skipped += 1
+                continue
 
             if os.path.exists(dest_path):
                 if cfg.conflict == CONFLICT_RENAME:
@@ -318,7 +332,7 @@ def copy_volume(
                     stats.bytes_copied += stat.st_size
                 continue
 
-            submit(entry.path, dest_path, stat.st_size)
+            submit(entry.path, dest_path, stat.st_size, file_rel, stat.st_mtime_ns)
 
     try:
         walk(src_root, dst_root, "")
@@ -330,6 +344,9 @@ def copy_volume(
                     future.cancel()
             wait(outstanding)
             pool.shutdown(wait=True)
+
+    if manifest is not None and manifest.save():
+        log("info", f"增量清单已更新：{manifest.count} 条记录")
 
     stats.cancelled = cancel.is_set()
     if stats.cancelled:

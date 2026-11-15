@@ -90,6 +90,7 @@ class Config:
     max_parallel_copies: int = 1        # 同时复制的磁盘数
     copy_threads: int = 4               # 单个磁盘内并行复制文件的线程数（1=串行）
     exclude_dirs: str = ""                # 排除的文件夹，逗号/换行分隔，支持通配符
+    use_manifest: bool = True             # 用增量清单跳过已备份且未变化的文件
 
     # —— 扩展名过滤 ——
     ext_mode: str = EXT_ALL
@@ -115,6 +116,7 @@ class Config:
     poll_interval: float = 1.0
     single_instance: bool = True
     minimize_to_tray: bool = True
+    tray_icon: bool = True                # 显示系统托盘图标
     show_balloon: bool = True
     close_to_background: bool = True      # 关窗口时保持后台运行，再启动一次即可唤出
 

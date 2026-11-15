@@ -32,6 +32,8 @@ class CopierTests(unittest.TestCase):
         (self.src / "sub" / "b.bin").write_bytes(b"\x00" * 2048)
         (self.src / "empty").mkdir()
         self.cfg = Config(destination=str(self.dst))
+        # 冲突/过滤类用例关掉增量清单，避免"第二次复制被跳过"干扰断言
+        self.cfg.use_manifest = False
         self.volume = make_volume(str(self.src) + "\\")
 
     def _copy(self, cancel=None, dry_run=False):
@@ -159,6 +161,60 @@ class CopierTests(unittest.TestCase):
         self.cfg.black_exts = "bin"
         files, _ = scan_volume(self.volume, self.cfg)
         self.assertEqual(files, 1)
+class ManifestTests(unittest.TestCase):
+    """增量清单：第二次复制应跳过未变化的文件。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="mf-", dir=TEST_TMP))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.src = self.tmp / "src"
+        self.dst = self.tmp / "dst"
+        self.src.mkdir()
+        (self.src / "a.txt").write_text("hello", encoding="utf-8")
+        (self.src / "sub").mkdir()
+        (self.src / "sub" / "b.bin").write_bytes(b"\x00" * 1024)
+        self.cfg = Config(destination=str(self.dst), use_manifest=True)
+        self.volume = make_volume(str(self.src) + "\\")
+
+    def _copy(self):
+        return copy_volume(self.volume, self.dst, self.cfg, threading.Event(), lambda *a: None)
+
+    def test_second_copy_skips_everything(self):
+        first = self._copy()
+        self.assertEqual(first.files_copied, 2)
+        self.assertTrue((self.dst / ".usbcopyer-manifest.json").exists())
+
+        second = self._copy()
+        self.assertEqual(second.files_copied, 0)
+        self.assertEqual(second.files_skipped, 2)
+
+    def test_manifest_recopies_modified_file(self):
+        self._copy()
+        time.sleep(0.01)
+        (self.src / "a.txt").write_text("changed", encoding="utf-8")
+        third = self._copy()
+        self.assertEqual(third.files_copied, 1)
+        self.assertEqual((self.dst / "a.txt").read_text(encoding="utf-8"), "changed")
+
+    def test_manifest_recopies_missing_destination(self):
+        self._copy()
+        (self.dst / "a.txt").unlink()
+        again = self._copy()
+        self.assertEqual(again.files_copied, 1)
+        self.assertTrue((self.dst / "a.txt").exists())
+
+    def test_manifest_disabled_always_copies(self):
+        # 关掉清单 + 强制覆盖：两次都应该真复制（证明跳过是清单带来的）
+        self.cfg.use_manifest = False
+        self.cfg.conflict = "overwrite"
+        self._copy()
+        self.assertEqual(self._copy().files_copied, 2)
+
+    def test_manifest_survives_reload(self):
+        from usbcopyer.manifest import Manifest
+        self._copy()
+        m = Manifest.for_target(self.dst).load()
+        self.assertEqual(m.count, 2)
 
 class TargetGuardTests(unittest.TestCase):
     def test_cross_drive_allowed(self):

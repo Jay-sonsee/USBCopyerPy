@@ -48,6 +48,7 @@ jobs:
           --name "USBCopyerPy-${{ matrix.suffix }}"
           --paths .
           --hidden-import usbcopyer.ui
+          --icon packaging/app.ico
           packaging/entry.py
 
       - name: Build console exe
@@ -56,6 +57,7 @@ jobs:
           --name "USBCopyerPy-console-${{ matrix.suffix }}"
           --paths .
           --hidden-import usbcopyer.ui
+          --icon packaging/app.ico
           packaging/entry.py
 
       - name: Verify binaries

@@ -30,6 +30,14 @@ from .config import (
 )
 from .rules import RULE_TOKENS, parse_folder_rule
 
+def format_duration(seconds: float) -> str:
+    """把秒数格式化成 mm:ss 或 h:mm:ss。"""
+    seconds = int(max(0, seconds))
+    if seconds >= 3600:
+        return f"{seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
+    return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+
 CONFLICT_LABELS = {
     "skip_if_newer": "仅当源文件更新时覆盖（推荐）",
     "overwrite": "总是覆盖",
@@ -112,6 +120,10 @@ class SettingsDialog(tk.Toplevel):
 
         self.vars["skip_empty_dirs"] = tk.BooleanVar(value=self.cfg.skip_empty_dirs)
         ttk.Checkbutton(f, text="跳过空文件夹", variable=self.vars["skip_empty_dirs"]).grid(row=6, column=1, sticky="w", padx=6, pady=3)
+
+        self.vars["use_manifest"] = tk.BooleanVar(value=self.cfg.use_manifest)
+        ttk.Checkbutton(f, text="使用增量清单（跳过已备份且未变化的文件）",
+                        variable=self.vars["use_manifest"]).grid(row=7, column=1, sticky="w", padx=6, pady=3)
 
     def _tab_filter(self, nb, pad) -> None:
         f = ttk.Frame(nb, padding=6)
@@ -205,7 +217,12 @@ class SettingsDialog(tk.Toplevel):
                         variable=self.vars["close_to_background"]).grid(
             row=7, column=0, columnspan=2, sticky="w", padx=6, pady=(8, 3))
 
-        ttk.Label(f, text="轮询间隔、单实例需要重启程序后生效", foreground="#a15c00").grid(row=8, column=0, columnspan=2, sticky="w", padx=6, pady=(10, 0))
+        self.vars["tray_icon"] = tk.BooleanVar(value=self.cfg.tray_icon)
+        ttk.Checkbutton(f, text="显示系统托盘图标（右键菜单：显示/暂停/停止/退出）",
+                        variable=self.vars["tray_icon"]).grid(
+            row=8, column=0, columnspan=2, sticky="w", padx=6, pady=3)
+
+        ttk.Label(f, text="轮询间隔、单实例需要重启程序后生效", foreground="#a15c00").grid(row=9, column=0, columnspan=2, sticky="w", padx=6, pady=(10, 0))
 
     # ---------------------------------------------------------------- 动作
     def _pick_dir(self) -> None:
@@ -228,6 +245,7 @@ class SettingsDialog(tk.Toplevel):
         cfg.delay_seconds = int(self.vars["delay_seconds"].get())
         cfg.clear_target_first = bool(self.vars["clear_target_first"].get())
         cfg.skip_empty_dirs = bool(self.vars["skip_empty_dirs"].get())
+        cfg.use_manifest = bool(self.vars["use_manifest"].get())
 
         cfg.ext_mode = EXT_REVERSE.get(self.vars["ext_mode"].get(), EXT_ALL)
         cfg.black_exts = self.vars["black_exts"].get().strip()
@@ -250,6 +268,7 @@ class SettingsDialog(tk.Toplevel):
         cfg.single_instance = bool(self.vars["single_instance"].get())
         cfg.copy_threads = int(self.vars["copy_threads"].get())
         cfg.close_to_background = bool(self.vars["close_to_background"].get())
+        cfg.tray_icon = bool(self.vars["tray_icon"].get())
         cfg.data_dir = self.vars["data_dir"].get().strip()
         return cfg
 
@@ -288,9 +307,12 @@ class ControlPanel(tk.Tk):
         self.cfg = cfg
         self.app = UsbCopyerApp(cfg, cfg.log_path)
         self._queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        self._actions: queue.Queue[str] = queue.Queue()
+        self.tray = None
         self.app.add_listener(lambda level, msg: self._queue.put((level, msg)))
         self._build()
         self.app.start()
+        self._init_tray()
         self._signal = ShowSignal()
         self._signal.listen(lambda: self.after(0, self._restore_window))
         self.after(200, self._drain)
@@ -323,6 +345,66 @@ class ControlPanel(tk.Tk):
         self.log.tag_config("info", foreground="#222")
 
         ttk.Label(self, text=f"备份目录：{self.cfg.destination or '(未设置)'}", foreground="#555").pack(anchor="w", padx=10, pady=(4, 8))
+
+    # ---------------------------------------------------------------- 托盘
+    def _init_tray(self) -> None:
+        if not self.cfg.tray_icon:
+            return
+        try:
+            from .tray import TrayIcon
+        except Exception as exc:
+            self.app.log("warn", f"托盘图标模块不可用：{exc}")
+            return
+        try:
+            tray = TrayIcon(
+                tooltip=f"{APP_NAME} v{__version__}",
+                on_show=lambda: self._actions.put("show"),
+                on_toggle=lambda: self._actions.put("toggle"),
+                on_stop=lambda: self._actions.put("stop"),
+                on_open_dir=lambda: self._actions.put("open"),
+                on_exit=lambda: self._actions.put("exit"),
+            )
+            if tray.start():
+                self.tray = tray
+                self.app.log("info", "托盘图标已启动：右键可操作，双击显示窗口")
+            else:
+                self.app.log("warn", f"托盘图标启动失败：{tray.error}")
+        except Exception as exc:
+            self.app.log("warn", f"托盘图标不可用：{exc}")
+
+    def _handle_actions(self) -> None:
+        while True:
+            try:
+                action = self._actions.get_nowait()
+            except queue.Empty:
+                return
+            if action == "show":
+                self._restore_window()
+            elif action == "toggle":
+                self._toggle_pause()
+            elif action == "stop":
+                self.app.cancel_all()
+            elif action == "open":
+                self._open_dest()
+            elif action == "exit":
+                self.quit_app()
+                return
+
+    def _update_tray(self, tasks: list[dict]) -> None:
+        if not self.tray:
+            return
+        if tasks:
+            first = tasks[0]
+            if len(tasks) == 1:
+                text = f"{APP_NAME}：{first['letter']}: {first['percent']:.0f}%  {format_size(int(first['speed']))}/s"
+            else:
+                text = f"{APP_NAME}：正在复制 {len(tasks)} 个设备"
+        elif self.app.paused:
+            text = f"{APP_NAME}：已暂停"
+        else:
+            text = f"{APP_NAME}：空闲，等待设备插入"
+        self.tray.update_tooltip(text[:120])
+        self.tray.set_toggle_label("恢复监听" if self.app.paused else "暂停监听")
 
     # ---------------------------------------------------------------- 事件
     def _toggle_pause(self) -> None:
@@ -357,7 +439,10 @@ class ControlPanel(tk.Tk):
     def _on_close(self) -> None:
         if self.cfg.close_to_background:
             self.withdraw()
-            self._append("info", "已转入后台运行：再次启动程序即可唤出窗口")
+            if self.tray:
+                self.app.log("info", "已最小化到托盘，双击托盘图标可恢复窗口；右键菜单可退出")
+            else:
+                self._append("info", "已转入后台运行：再次启动程序即可唤出窗口")
             return
         self.quit_app()
 
@@ -372,6 +457,11 @@ class ControlPanel(tk.Tk):
             self.app.stop()
         finally:
             try:
+                if self.tray:
+                    self.tray.stop()
+            except Exception:
+                pass
+            try:
                 self._signal.stop()
             except Exception:
                 pass
@@ -379,6 +469,7 @@ class ControlPanel(tk.Tk):
 
     # ---------------------------------------------------------------- 刷新
     def _drain(self) -> None:
+        self._handle_actions()
         while True:
             try:
                 level, msg = self._queue.get_nowait()
@@ -393,10 +484,14 @@ class ControlPanel(tk.Tk):
             if len(tasks) == 1:
                 task = tasks[0]
                 self.progress["value"] = task["percent"]
+                speed = task["speed"]
+                speed_text = f"{format_size(int(speed))}/s" if speed > 0 else "计算中…"
+                eta_text = format_duration(task["eta"]) if speed > 0 else "--:--"
                 self.progress_var.set(
                     f"{task['letter']}: {task['percent']:.0f}%   "
                     f"{task['files']}/{task['total_files']} 个文件   "
                     f"{format_size(task['bytes'])} / {format_size(task['total_bytes'])}   "
+                    f"{speed_text}   剩余 {eta_text}   "
                     f"{task['current']}"
                 )
             else:
@@ -412,6 +507,7 @@ class ControlPanel(tk.Tk):
             self.progress["value"] = 0
             self.progress_var.set("")
 
+        self._update_tray(tasks)
         self.after(400, self._drain)
 
     def _append(self, level: str, message: str) -> None:

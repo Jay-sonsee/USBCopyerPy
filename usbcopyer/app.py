@@ -43,6 +43,9 @@ class CopyTask:
     done_files: int = 0
     done_bytes: int = 0
     current_name: str = ""
+    speed: float = 0.0          # 字节/秒，最近 5 秒滑动窗口
+    eta_seconds: float = 0.0    # 预计剩余秒数
+    samples: list = field(default_factory=list)
 
     @property
     def letter(self) -> str:
@@ -152,6 +155,8 @@ class UsbCopyerApp:
                     "bytes": task.done_bytes,
                     "total_bytes": task.total_bytes,
                     "current": task.current_name,
+                    "speed": round(task.speed, 1),
+                    "eta": round(task.eta_seconds, 1),
                 }
                 for task in self._copies.values()
             ]
@@ -284,9 +289,25 @@ class UsbCopyerApp:
         task.done_files = count
         task.done_bytes = total
         task.current_name = name
+
+        # 只用最近 5 秒的样本算速度，避免开头慢、中途抖导致的 ETA 乱跳
+        now = time.time()
+        with self._lock:
+            task.samples.append((now, total))
+            while len(task.samples) > 2 and now - task.samples[0][0] > 5.0:
+                task.samples.pop(0)
+            if len(task.samples) >= 2:
+                t0, b0 = task.samples[0]
+                elapsed = now - t0
+                if elapsed >= 0.2:
+                    task.speed = max(0.0, (total - b0) / elapsed)
+                    remaining = max(0, task.total_bytes - total)
+                    task.eta_seconds = remaining / task.speed if task.speed > 1 else 0.0
+
         # 每 50 个文件打一条，避免日志爆炸
         if count % 50 == 0:
-            self.log("info", f"{task.letter}: 进度 {task.percent:.0f}%（{count}/{task.total_files or '?'} 个文件，{format_size(total)}）")
+            speed_text = f"{format_size(int(task.speed))}/s" if task.speed > 0 else "计算中"
+            self.log("info", f"{task.letter}: 进度 {task.percent:.0f}%（{count}/{task.total_files or '?'} 个文件，{format_size(total)}，{speed_text}）")
 
     def _append_disk_log(self, volume: VolumeInfo, target: Path, stats: CopyStats) -> None:
         path = self.cfg.disk_log_path

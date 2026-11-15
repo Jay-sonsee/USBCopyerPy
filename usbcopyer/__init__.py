@@ -7,5 +7,5 @@
 分块复制 + 协作式取消、全部状态访问加锁。
 """
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 APP_NAME = "USBCopyerPy"
