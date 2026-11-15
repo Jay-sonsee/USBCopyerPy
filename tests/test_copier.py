@@ -126,6 +126,39 @@ class CopierTests(unittest.TestCase):
         self._copy()
         self.assertFalse((self.dst / "stale.txt").exists())
 
+    def test_exclude_dir_not_copied(self):
+        self.cfg.exclude_dirs = "node_modules"
+        (self.src / "node_modules").mkdir()
+        (self.src / "node_modules" / "big.js").write_text("x", encoding="utf-8")
+        stats = self._copy()
+        self.assertFalse((self.dst / "node_modules").exists())
+        self.assertEqual(stats.excluded_dirs, 1)
+        self.assertEqual(stats.files_copied, 2)
+
+    def test_exclude_wildcard(self):
+        self.cfg.exclude_dirs = "photos*"
+        (self.src / "photos2020").mkdir()
+        (self.src / "photos2020" / "a.jpg").write_bytes(b"x")
+        stats = self._copy()
+        self.assertFalse((self.dst / "photos2020").exists())
+        self.assertEqual(stats.files_copied, 2)
+
+    def test_scan_matches_actual_copy(self):
+        from usbcopyer.copier import scan_volume
+        self.cfg.exclude_dirs = "node_modules"
+        (self.src / "node_modules").mkdir()
+        (self.src / "node_modules" / "x.js").write_text("x", encoding="utf-8")
+        files, total = scan_volume(self.volume, self.cfg)
+        stats = self._copy()
+        self.assertEqual(files, stats.files_copied)
+        self.assertEqual(total, stats.bytes_copied)
+
+    def test_scan_respects_ext_filter(self):
+        from usbcopyer.copier import scan_volume
+        self.cfg.ext_mode = "black"
+        self.cfg.black_exts = "bin"
+        files, _ = scan_volume(self.volume, self.cfg)
+        self.assertEqual(files, 1)
 
 class TargetGuardTests(unittest.TestCase):
     def test_cross_drive_allowed(self):

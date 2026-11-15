@@ -14,6 +14,8 @@ from tkinter import filedialog, messagebox, ttk
 
 from . import APP_NAME, __version__
 from .app import UsbCopyerApp
+from .copier import format_size
+from .winapi import ShowSignal
 from .config import (
     CONFLICT_CHOICES,
     DISK_BLACK,
@@ -133,6 +135,18 @@ class SettingsDialog(tk.Toplevel):
         self.vars["size_limit_mb"] = tk.IntVar(value=self.cfg.size_limit_mb)
         self._row(f, 6, "阈值（MB）", ttk.Spinbox(f, from_=0, to=1024 * 1024, textvariable=self.vars["size_limit_mb"], width=10))
 
+        ttk.Separator(f, orient="horizontal").grid(row=7, column=0, columnspan=3, sticky="we", padx=6, pady=(10, 6))
+        ttk.Label(f, text="排除的文件夹（不备份，逗号或换行分隔，支持 * 通配符）").grid(
+            row=8, column=0, columnspan=3, sticky="w", padx=6)
+        self.exclude_text = tk.Text(f, height=4, width=52, wrap="word")
+        self.exclude_text.grid(row=9, column=0, columnspan=3, sticky="we", padx=6, pady=4)
+        self.exclude_text.insert("1.0", self.cfg.exclude_dirs)
+        ttk.Label(
+            f,
+            text="例：node_modules、.git、System Volume Information、photos\\2020、*.tmp",
+            foreground="#666",
+        ).grid(row=10, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 4))
+
     def _tab_disk(self, nb, pad) -> None:
         f = ttk.Frame(nb, padding=6)
         nb.add(f, text="磁盘筛选")
@@ -182,7 +196,12 @@ class SettingsDialog(tk.Toplevel):
         self.vars["data_dir"] = tk.StringVar(value=self.cfg.data_dir)
         self._row(f, 5, "数据目录（留空用默认）", ttk.Entry(f, textvariable=self.vars["data_dir"], width=46))
 
-        ttk.Label(f, text="轮询间隔、单实例需要重启程序后生效", foreground="#a15c00").grid(row=6, column=0, columnspan=2, sticky="w", padx=6, pady=(10, 0))
+        self.vars["close_to_background"] = tk.BooleanVar(value=self.cfg.close_to_background)
+        ttk.Checkbutton(f, text="关闭窗口时保持后台运行（再启动一次可唤出窗口）",
+                        variable=self.vars["close_to_background"]).grid(
+            row=6, column=0, columnspan=2, sticky="w", padx=6, pady=(8, 3))
+
+        ttk.Label(f, text="轮询间隔、单实例需要重启程序后生效", foreground="#a15c00").grid(row=7, column=0, columnspan=2, sticky="w", padx=6, pady=(10, 0))
 
     # ---------------------------------------------------------------- 动作
     def _pick_dir(self) -> None:
@@ -213,6 +232,7 @@ class SettingsDialog(tk.Toplevel):
 
         cfg.size_mode = SIZE_REVERSE.get(self.vars["size_mode"].get(), SIZE_NONE)
         cfg.size_limit_mb = int(self.vars["size_limit_mb"].get())
+        cfg.exclude_dirs = self.exclude_text.get("1.0", "end").strip()
 
         cfg.skip_types = [k for k, v in self.type_vars.items() if v.get()]
         cfg.disk_mode = self.vars["disk_mode"].get()
@@ -224,6 +244,7 @@ class SettingsDialog(tk.Toplevel):
         cfg.poll_interval = float(self.vars["poll_interval"].get())
         cfg.max_parallel_copies = int(self.vars["max_parallel_copies"].get())
         cfg.single_instance = bool(self.vars["single_instance"].get())
+        cfg.close_to_background = bool(self.vars["close_to_background"].get())
         cfg.data_dir = self.vars["data_dir"].get().strip()
         return cfg
 
@@ -265,6 +286,8 @@ class ControlPanel(tk.Tk):
         self.app.add_listener(lambda level, msg: self._queue.put((level, msg)))
         self._build()
         self.app.start()
+        self._signal = ShowSignal()
+        self._signal.listen(lambda: self.after(0, self._restore_window))
         self.after(200, self._drain)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -281,6 +304,12 @@ class ControlPanel(tk.Tk):
         ttk.Button(btns, text="停止复制", command=lambda: self.app.cancel_all()).pack(side="left", padx=3)
         ttk.Button(btns, text="设置…", command=self._open_settings).pack(side="left", padx=3)
         ttk.Button(btns, text="打开目录", command=self._open_dest).pack(side="left", padx=3)
+        ttk.Button(btns, text="退出", command=self.quit_app).pack(side="left", padx=3)
+
+        self.progress = ttk.Progressbar(self, mode="determinate", maximum=100.0)
+        self.progress.pack(fill="x", padx=10, pady=(8, 0))
+        self.progress_var = tk.StringVar(value="")
+        ttk.Label(self, textvariable=self.progress_var, foreground="#555").pack(anchor="w", padx=10, pady=(2, 4))
 
         self.log = tk.Text(self, height=18, state="disabled", wrap="word", font=("Consolas", 9))
         self.log.pack(fill="both", expand=True, padx=10)
@@ -321,9 +350,26 @@ class ControlPanel(tk.Tk):
         subprocess.Popen(["explorer.exe", dest])
 
     def _on_close(self) -> None:
+        if self.cfg.close_to_background:
+            self.withdraw()
+            self._append("info", "已转入后台运行：再次启动程序即可唤出窗口")
+            return
+        self.quit_app()
+
+    def _restore_window(self) -> None:
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+        self._append("info", "窗口已唤出")
+
+    def quit_app(self) -> None:
         try:
             self.app.stop()
         finally:
+            try:
+                self._signal.stop()
+            except Exception:
+                pass
             self.destroy()
 
     # ---------------------------------------------------------------- 刷新
@@ -339,10 +385,27 @@ class ControlPanel(tk.Tk):
         if tasks:
             letters = "、".join(f"{t['letter']}:" for t in tasks)
             self.status_var.set(f"正在复制 {letters}（{len(tasks)} 个任务）")
+            if len(tasks) == 1:
+                task = tasks[0]
+                self.progress["value"] = task["percent"]
+                self.progress_var.set(
+                    f"{task['letter']}: {task['percent']:.0f}%   "
+                    f"{task['files']}/{task['total_files']} 个文件   "
+                    f"{format_size(task['bytes'])} / {format_size(task['total_bytes'])}   "
+                    f"{task['current']}"
+                )
+            else:
+                self.progress["value"] = sum(x["percent"] for x in tasks) / len(tasks)
+                self.progress_var.set("多个任务同时进行：" + "、".join(
+                    f"{x['letter']} {x['percent']:.0f}%" for x in tasks))
         elif self.app.paused:
             self.status_var.set("已暂停")
+            self.progress["value"] = 0
+            self.progress_var.set("")
         else:
             self.status_var.set("空闲 · 等待设备插入")
+            self.progress["value"] = 0
+            self.progress_var.set("")
 
         self.after(400, self._drain)
 

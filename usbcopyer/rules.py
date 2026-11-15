@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import re
 from dataclasses import dataclass
 
@@ -126,6 +127,49 @@ def sanitize_name(name: str, fallback: str = "UDisk") -> str:
 def build_folder_name(rule: str, volume) -> str:
     """解析 + 渲染 + 清洗，一步到位。"""
     return sanitize_name(render_folder_rule(parse_folder_rule(rule), volume))
+
+
+# ---------------------------------------------------------------- 文件夹排除
+
+_EXCLUDE_SPLIT = re.compile(r"[,;，；\r\n]+")
+
+
+def parse_exclude_patterns(text: str) -> list[str]:
+    """把 'node_modules, .git; 系统卷*' 拆成小写模式列表。
+
+    支持通配符（`*` `?`），`/` 会被统一成 `\\`，首尾分隔符会去掉。
+    """
+    patterns: list[str] = []
+    for raw in _EXCLUDE_SPLIT.split(text or ""):
+        item = raw.strip().replace("/", "\\").strip("\\").lower()
+        if item:
+            patterns.append(item)
+    return patterns
+
+
+def should_exclude_dir(rel_path: str, name: str, patterns: list[str]) -> bool:
+    """判断某个文件夹是否命中排除规则。
+
+    - 只写名字（`node_modules`）→ 任意层级的同名文件夹都排除
+    - 写相对路径（`photos\\2020`）→ 按相对路径匹配
+    - 支持通配符（`*.tmp`、`cache*`）
+    """
+    if not patterns:
+        return False
+
+    name_l = (name or "").lower()
+    rel_l = (rel_path or "").replace("/", "\\").strip("\\").lower()
+
+    for pattern in patterns:
+        if fnmatch.fnmatchcase(name_l, pattern):
+            return True
+        if rel_l:
+            if fnmatch.fnmatchcase(rel_l, pattern):
+                return True
+            # 写成前缀形式时，把整棵子树都排除
+            if fnmatch.fnmatchcase(rel_l, pattern + "\\*"):
+                return True
+    return False
 
 
 # ---------------------------------------------------------------- 扩展名

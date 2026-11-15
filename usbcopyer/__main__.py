@@ -20,7 +20,7 @@ from pathlib import Path
 from . import APP_NAME, __version__
 from .app import UsbCopyerApp
 from .config import Config
-from .winapi import SingleInstance, list_drive_roots, volume_info
+from .winapi import ShowSignal, SingleInstance, list_drive_roots, volume_info
 
 
 def cmd_list() -> int:
@@ -181,7 +181,11 @@ def main(argv: list[str] | None = None) -> int:
     if cfg.single_instance and not args.headless:
         guard = SingleInstance("USBCopyerPy.SingleInstance")
         if not guard.acquired:
-            print("已经有一个实例在运行。", file=sys.stderr)
+            # 已有实例：让它把窗口显示出来，然后本次退出
+            if ShowSignal.signal_existing():
+                print("程序已在后台运行，已唤出窗口。")
+                return 0
+            print("已经有一个实例在运行，但无法唤出它的窗口。", file=sys.stderr)
             return 9
 
     try:

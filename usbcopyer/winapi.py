@@ -8,6 +8,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes as wt
 import string
+import threading
 from dataclasses import dataclass
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -30,6 +31,21 @@ kernel32.CreateMutexW.argtypes = [wt.LPVOID, wt.BOOL, wt.LPCWSTR]
 
 kernel32.CloseHandle.restype = wt.BOOL
 kernel32.CloseHandle.argtypes = [wt.HANDLE]
+
+kernel32.CreateEventW.restype = wt.HANDLE
+kernel32.CreateEventW.argtypes = [wt.LPVOID, wt.BOOL, wt.BOOL, wt.LPCWSTR]
+
+kernel32.OpenEventW.restype = wt.HANDLE
+kernel32.OpenEventW.argtypes = [wt.DWORD, wt.BOOL, wt.LPCWSTR]
+
+kernel32.SetEvent.restype = wt.BOOL
+kernel32.SetEvent.argtypes = [wt.HANDLE]
+
+kernel32.WaitForSingleObject.restype = wt.DWORD
+kernel32.WaitForSingleObject.argtypes = [wt.HANDLE, wt.DWORD]
+
+EVENT_MODIFY_STATE = 0x0002
+INFINITE = 0xFFFFFFFF
 
 ERROR_ALREADY_EXISTS = 183
 
@@ -148,3 +164,50 @@ class SingleInstance:
 
     def __exit__(self, *exc) -> None:
         self.release()
+
+class ShowSignal:
+    """用于"再启动一次程序即唤出已有窗口"。
+
+    第一个实例创建命名事件并在后台线程等待；后续实例 SetEvent 一下，
+    后台实例收到后把窗口显示出来。比托盘图标简单，且不依赖第三方库。
+    """
+
+    NAME = "USBCopyerPy.ShowWindow"
+
+    def __init__(self, name: str = NAME):
+        self._name = name
+        self._handle = kernel32.CreateEventW(None, False, False, name)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def listen(self, callback) -> None:
+        if not self._handle:
+            return
+
+        def loop() -> None:
+            while not self._stop.is_set():
+                result = kernel32.WaitForSingleObject(self._handle, 500)
+                if result == 0:
+                    try:
+                        callback()
+                    except Exception:
+                        pass
+
+        self._thread = threading.Thread(target=loop, name="show-signal", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._handle:
+            kernel32.CloseHandle(self._handle)
+            self._handle = None
+
+    @classmethod
+    def signal_existing(cls, name: str = NAME) -> bool:
+        handle = kernel32.OpenEventW(EVENT_MODIFY_STATE, False, name)
+        if not handle:
+            return False
+        try:
+            return bool(kernel32.SetEvent(handle))
+        finally:
+            kernel32.CloseHandle(handle)

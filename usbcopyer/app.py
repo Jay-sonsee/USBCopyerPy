@@ -20,7 +20,7 @@ from typing import Callable
 from . import APP_NAME
 from .callbacks import run_callback
 from .config import Config
-from .copier import CopyStats, copy_volume
+from .copier import CopyStats, copy_volume, format_size, scan_volume
 from .rules import build_folder_name, parse_ext_list
 from .watcher import DriveWatcher
 from .winapi import VolumeInfo
@@ -37,9 +37,24 @@ class CopyTask:
     started_at: float = field(default_factory=time.time)
     stats: CopyStats | None = None
 
+    # —— 进度 ——
+    total_files: int = 0
+    total_bytes: int = 0
+    done_files: int = 0
+    done_bytes: int = 0
+    current_name: str = ""
+
     @property
     def letter(self) -> str:
         return self.volume.letter
+
+    @property
+    def percent(self) -> float:
+        if self.total_bytes > 0:
+            return min(100.0, self.done_bytes * 100.0 / self.total_bytes)
+        if self.total_files > 0:
+            return min(100.0, self.done_files * 100.0 / self.total_files)
+        return 0.0
 
 
 class UsbCopyerApp:
@@ -131,6 +146,12 @@ class UsbCopyerApp:
                     "serial": task.volume.serial,
                     "target": str(task.target),
                     "elapsed": round(time.time() - task.started_at, 1),
+                    "percent": round(task.percent, 1),
+                    "files": task.done_files,
+                    "total_files": task.total_files,
+                    "bytes": task.done_bytes,
+                    "total_bytes": task.total_bytes,
+                    "current": task.current_name,
                 }
                 for task in self._copies.values()
             ]
@@ -236,10 +257,12 @@ class UsbCopyerApp:
                     self.log("warn", f"{volume.letter}: 回调返回 {code}，取消本次复制")
                     return
 
-            self.log("info", f"{volume.letter}: 开始复制到 {task.target}")
+            total_files, total_bytes = scan_volume(volume, self.cfg)
+            task.total_files, task.total_bytes = total_files, total_bytes
+            self.log("info", f"{volume.letter}: 待复制 {total_files} 个文件 / {format_size(total_bytes)}，开始复制到 {task.target}")
             stats = copy_volume(
                 volume, task.target, self.cfg, task.cancel, self.log,
-                progress=lambda n, b, name: self._on_progress(volume, n, b, name),
+                progress=lambda n, b, name: self._on_progress(task, n, b, name),
             )
             task.stats = stats
             self.log("info", f"{volume.letter}: {stats.summary()}")
@@ -257,11 +280,13 @@ class UsbCopyerApp:
                 self._copies.pop(volume.letter, None)
             self.log("info", f"{volume.letter}: 任务结束")
 
-    def _on_progress(self, volume: VolumeInfo, count: int, total: int, name: str) -> None:
+    def _on_progress(self, task: CopyTask, count: int, total: int, name: str) -> None:
+        task.done_files = count
+        task.done_bytes = total
+        task.current_name = name
         # 每 50 个文件打一条，避免日志爆炸
         if count % 50 == 0:
-            from .copier import format_size
-            self.log("info", f"{volume.letter}: 已复制 {count} 个文件 / {format_size(total)}")
+            self.log("info", f"{task.letter}: 进度 {task.percent:.0f}%（{count}/{task.total_files or '?'} 个文件，{format_size(total)}）")
 
     def _append_disk_log(self, volume: VolumeInfo, target: Path, stats: CopyStats) -> None:
         path = self.cfg.disk_log_path

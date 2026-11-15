@@ -23,7 +23,7 @@ from .config import (
     SIZE_MIN,
     Config,
 )
-from .rules import ext_allowed
+from .rules import ext_allowed, parse_exclude_patterns, should_exclude_dir
 
 CHUNK_SIZE = 1024 * 1024  # 1MB
 
@@ -39,6 +39,7 @@ class CopyStats:
     files_failed: int = 0
     bytes_copied: int = 0
     dirs_created: int = 0
+    excluded_dirs: int = 0
     cancelled: bool = False
     errors: list[tuple[str, str]] = field(default_factory=list)
 
@@ -111,6 +112,51 @@ def _unique_name(path: str) -> str:
     return os.path.join(parent, f"{uuid.uuid4().hex[:8]}-{name}")
 
 
+def scan_volume(volume, cfg: Config) -> tuple[int, int]:
+    """预扫描：统计实际会被复制的文件数与字节数，供进度条计算百分比。
+
+    与 copy_volume 使用同一套过滤规则（排除文件夹 / 扩展名 / 大小限制），
+    只读元数据，不读文件内容，几万个文件通常一两秒内完成。
+    """
+    src_root = os.path.abspath(volume.root)
+    patterns = parse_exclude_patterns(cfg.exclude_dirs)
+    size_limit = cfg.size_limit_mb * 1024 * 1024
+    files = 0
+    total = 0
+
+    stack: list[tuple[str, str]] = [(src_root, "")]
+    while stack:
+        current, rel = stack.pop()
+        try:
+            with os.scandir(current) as it:
+                entries = list(it)
+        except OSError:
+            continue
+
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    child_rel = f"{rel}\\{entry.name}" if rel else entry.name
+                    if not should_exclude_dir(child_rel, entry.name, patterns):
+                        stack.append((entry.path, child_rel))
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                if not ext_allowed(entry.path, cfg.ext_mode, cfg.black_exts, cfg.white_exts, cfg.copy_no_ext):
+                    continue
+                size = entry.stat().st_size
+            except OSError:
+                continue
+
+            if cfg.size_mode == SIZE_MAX and size >= size_limit:
+                continue
+            if cfg.size_mode == SIZE_MIN and size <= size_limit:
+                continue
+            files += 1
+            total += size
+
+    return files, total
+
 def copy_volume(
     volume,
     target_dir: Path,
@@ -135,8 +181,9 @@ def copy_volume(
         os.makedirs(dst_root, exist_ok=True)
 
     size_limit = cfg.size_limit_mb * 1024 * 1024
+    exclude_patterns = parse_exclude_patterns(cfg.exclude_dirs)
 
-    def walk(current_src: str, current_dst: str) -> None:
+    def walk(current_src: str, current_dst: str, rel_path: str) -> None:
         if cancel.is_set():
             raise Cancelled()
         try:
@@ -152,7 +199,11 @@ def copy_volume(
                 raise Cancelled()
             try:
                 if entry.is_dir(follow_symlinks=False):
-                    walk(entry.path, os.path.join(current_dst, entry.name))
+                    child_rel = f"{rel_path}\\{entry.name}" if rel_path else entry.name
+                    if should_exclude_dir(child_rel, entry.name, exclude_patterns):
+                        stats.excluded_dirs += 1
+                        continue
+                    walk(entry.path, os.path.join(current_dst, entry.name), child_rel)
                     continue
                 if not entry.is_file(follow_symlinks=False):
                     continue
@@ -216,7 +267,7 @@ def copy_volume(
                 log("warn", f"复制失败 {entry.path}：{exc}")
 
     try:
-        walk(src_root, dst_root)
+        walk(src_root, dst_root, "")
     except Cancelled:
         stats.cancelled = True
         log("warn", f"{volume.letter}: 复制已取消")

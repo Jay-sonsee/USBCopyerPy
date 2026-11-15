@@ -1,13 +1,15 @@
-﻿import unittest
+import unittest
 
 from usbcopyer.rules import (
     build_folder_name,
     ext_allowed,
     file_ext,
+    parse_exclude_patterns,
     parse_ext_list,
     parse_folder_rule,
     render_folder_rule,
     sanitize_name,
+    should_exclude_dir,
 )
 from usbcopyer.winapi import VolumeInfo
 
@@ -117,6 +119,31 @@ class ExtensionTests(unittest.TestCase):
     def test_ext_all(self):
         self.assertTrue(ext_allowed("a.exe", "all", "exe", "jpg", True))
 
+
+class ExcludeTests(unittest.TestCase):
+    def test_parse(self):
+        self.assertEqual(
+            parse_exclude_patterns("node_modules, .git;\nSystem Volume Information"),
+            ["node_modules", ".git", "system volume information"],
+        )
+
+    def test_name_matches_any_depth(self):
+        patterns = parse_exclude_patterns("node_modules")
+        self.assertTrue(should_exclude_dir("web\\\\node_modules", "node_modules", patterns))
+        self.assertFalse(should_exclude_dir("web\\\\src", "src", patterns))
+
+    def test_relative_path(self):
+        patterns = parse_exclude_patterns("photos\\\\2020")
+        self.assertTrue(should_exclude_dir("photos\\\\2020", "2020", patterns))
+        self.assertFalse(should_exclude_dir("photos\\\\2021", "2021", patterns))
+
+    def test_wildcard(self):
+        patterns = parse_exclude_patterns("cache*")
+        self.assertTrue(should_exclude_dir("a\\\\cachex", "cachex", patterns))
+        self.assertFalse(should_exclude_dir("a\\\\data", "data", patterns))
+
+    def test_empty_patterns(self):
+        self.assertFalse(should_exclude_dir("a", "a", []))
 
 if __name__ == "__main__":
     unittest.main()
